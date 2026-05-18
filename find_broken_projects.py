@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Author: Magnus Glantz, sudo@®redhat.com, 2026
+Author: Magnus Glantz, sudo @ redhat.com, 2026
 
 Identify likely-broken Ansible Automation Platform projects.
 
