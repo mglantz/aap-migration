@@ -18,10 +18,12 @@ Entity types covered:
   - project                 not referenced by any JT (project field), workflow
                             node / schedule (UJT-level reference), or
                             inventory source (source_project)
-  - job_template            never run AND not in any workflow/schedule
-                            (or stale beyond --stale-days if specified)
-  - workflow_job_template   never run AND not in any workflow/schedule
-                            (or stale beyond --stale-days if specified)
+  - job_template            unreferenced (not in any workflow or schedule)
+                            AND last run is older than --stale-days, or
+                            never run if --include-never-run is set
+  - workflow_job_template   unreferenced (not in any workflow or schedule)
+                            AND last run is older than --stale-days, or
+                            never run if --include-never-run is set
 
 Auth: bearer token in CONTROLLER_TOKEN env var (or --token).
 Host: CONTROLLER_HOST env var (or --host), e.g. https://controller.example.com
@@ -241,13 +243,14 @@ def find_orphan_projects(caches, used) -> list[dict]:
 
 
 def _orphan_ujt(record: dict, used: dict, entity_type: str,
-                stale_days: int | None, now: datetime) -> dict | None:
+                stale_days: int | None, include_never_run: bool,
+                now: datetime) -> dict | None:
     """Shared orphan logic for job templates and workflow job templates."""
     in_use = record["id"] in used["unified_job_template"]
     last_run = parse_iso8601(record.get("last_job_run"))
 
     reasons = []
-    if not in_use and not last_run:
+    if not in_use and not last_run and include_never_run:
         reasons.append("never_run_and_unreferenced")
     elif not in_use and stale_days is not None and last_run \
             and (now - last_run) > timedelta(days=stale_days):
@@ -266,19 +269,23 @@ def _orphan_ujt(record: dict, used: dict, entity_type: str,
     }
 
 
-def find_orphan_job_templates(caches, used, stale_days, now) -> list[dict]:
+def find_orphan_job_templates(caches, used, stale_days,
+                              include_never_run, now) -> list[dict]:
     out = []
     for jt in caches.get("job_templates", []):
-        rec = _orphan_ujt(jt, used, "job_template", stale_days, now)
+        rec = _orphan_ujt(jt, used, "job_template",
+                          stale_days, include_never_run, now)
         if rec:
             out.append(rec)
     return out
 
 
-def find_orphan_workflow_job_templates(caches, used, stale_days, now) -> list[dict]:
+def find_orphan_workflow_job_templates(caches, used, stale_days,
+                                       include_never_run, now) -> list[dict]:
     out = []
     for wf in caches.get("workflow_job_templates", []):
-        rec = _orphan_ujt(wf, used, "workflow_job_template", stale_days, now)
+        rec = _orphan_ujt(wf, used, "workflow_job_template",
+                          stale_days, include_never_run, now)
         if rec:
             out.append(rec)
     return out
@@ -321,9 +328,15 @@ def main() -> int:
                         help="Path to a CA bundle (PEM) to trust. "
                              "Env: CONTROLLER_CA_BUNDLE")
     parser.add_argument("--stale-days", type=int, default=None,
-                        help="Also flag JTs/WFJTs unreferenced AND not run in "
-                             "the past N days. Default: only flag never-run "
-                             "unreferenced templates.")
+                        help="Flag JTs/WFJTs that are unreferenced AND whose "
+                             "last run is older than N days. Templates with "
+                             "no run at all are ignored unless "
+                             "--include-never-run is set.")
+    parser.add_argument("--include-never-run", action="store_true",
+                        help="Also flag JTs/WFJTs that are unreferenced AND "
+                             "have never been run. Off by default since new "
+                             "or recently-created templates legitimately "
+                             "have no run yet.")
     parser.add_argument("--types", default="",
                         help="Comma-separated list of entity types to check. "
                              "Defaults to all. Choices: credential, "
@@ -388,10 +401,13 @@ def main() -> int:
         ("project",
             lambda: find_orphan_projects(caches, used)),
         ("job_template",
-            lambda: find_orphan_job_templates(caches, used, args.stale_days, now)),
+            lambda: find_orphan_job_templates(caches, used, args.stale_days,
+                                              args.include_never_run, now)),
         ("workflow_job_template",
             lambda: find_orphan_workflow_job_templates(caches, used,
-                                                       args.stale_days, now)),
+                                                       args.stale_days,
+                                                       args.include_never_run,
+                                                       now)),
     ]
 
     orphans: list[dict] = []
