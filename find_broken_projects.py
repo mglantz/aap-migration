@@ -14,14 +14,12 @@ problems, GitHub PAT-required, etc.). This adds specific reason tags like
 'auth:token_expired' and a short excerpt from the matching line. Disable with
 --no-auth-check if you don't want the extra API calls.
 
+Auth: bearer token in CONTROLLER_TOKEN env var (or --token).
+Host: CONTROLLER_HOST env var (or --host), e.g. https://controller.example.com
+
 Tested against AAP 2.4 controller API (/api/v2/projects/). For AAP 2.6 through
 the platform gateway, pass --api-prefix /api/controller/v2 and point --host
 at the gateway URL.
-
-To use this script export variables in your shell or pass as arguments.
-
-Auth: bearer token in CONTROLLER_TOKEN env var (or --token).
-Host: CONTROLLER_HOST env var (or --host), e.g. https://controller.example.com
 
 Example use:
 echo "CONTROLLER_HOST=https://aap24.example.com" >variables
@@ -111,8 +109,13 @@ def fetch_update_stdout(session: requests.Session, base_url: str,
     return "".join(buf)
 
 
-def classify(p: dict) -> list[str]:
-    """Return broken-reason tags for a project record; empty means healthy."""
+def classify(p: dict, include_never_run: bool = False) -> list[str]:
+    """Return broken-reason tags for a project record; empty means healthy.
+
+    Set include_never_run=True to also flag projects that have never produced
+    content (status=never_updated and empty scm_revision). Off by default
+    because those projects are unused/new rather than broken.
+    """
     reasons: list[str] = []
     status = (p.get("status") or "").lower()
     scm_type = p.get("scm_type") or ""  # empty => manual/local project
@@ -127,7 +130,7 @@ def classify(p: dict) -> list[str]:
         reasons.append(f"status={status}")
 
     # Configured but never attempted a successful sync.
-    if status == "never updated":
+    if include_never_run and status == "never updated":
         reasons.append("status=never_updated")
 
     # Last sync attempt failed (orthogonal to current status — useful when a
@@ -136,7 +139,8 @@ def classify(p: dict) -> list[str]:
         reasons.append("last_job_failed")
 
     # SCM project with no revision recorded => never produced usable content.
-    if scm_type and not p.get("scm_revision"):
+    # Overlaps with never-run, so gate behind the same flag.
+    if include_never_run and scm_type and not p.get("scm_revision"):
         reasons.append("no_scm_revision")
 
     # SCM project missing the URL it would need to sync.
@@ -199,6 +203,11 @@ def main() -> int:
                         help="Path to a CA bundle (PEM) to trust, e.g. an "
                              "internal CA that signed the controller's cert. "
                              "Preferable to --insecure. Env: CONTROLLER_CA_BUNDLE")
+    parser.add_argument("--include-never-run", action="store_true",
+                        help="Also flag projects that have never been synced "
+                             "(AAP status 'never updated' or no scm_revision "
+                             "yet). Off by default — new/unused projects "
+                             "aren't necessarily broken.")
     parser.add_argument("--no-auth-check", action="store_true",
                         help="Skip fetching/scanning project_update stdout for "
                              "auth-error patterns (faster, but no token/cred "
@@ -237,7 +246,7 @@ def main() -> int:
     try:
         for project in iter_projects(session, base_url, args.api_prefix):
             total += 1
-            reasons = classify(project)
+            reasons = classify(project, include_never_run=args.include_never_run)
             if not reasons:
                 continue
 
